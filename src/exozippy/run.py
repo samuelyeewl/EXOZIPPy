@@ -1178,6 +1178,15 @@ def _run_fit(config, gui, user_params=None):
                     filename_prefix=str(prefix) + "_polished",
                 )
 
+        # EXOFASTv2-compatible model files (<dir>/modelfiles/) at the same
+        # two points, under EXOFASTv2's `start` tag and `polished` in place
+        # of its `amoeba` (docs/model_files_plan.md).
+        from .outputs.model_files import write_model_files
+
+        write_model_files(system, build_internal_start, prefix, "start")
+        if polished_start:
+            write_model_files(system, internal_start, prefix, "polished")
+
         if profile:
             func = model.logp_dlogp_function(profile=True)
             func.profile.summary()
@@ -1810,6 +1819,18 @@ def _wrap_up(
         title=(config.get("run") or {}).get("name"),
         draws=draws,
     )
+
+    # EXOFASTv2-compatible model files (<dir>/modelfiles/) at the same
+    # median draw the summary figure is drawn at -- not EXOFASTv2's
+    # best-likelihood draw, for the reason median_draw_point records
+    # (docs/model_files_plan.md).  `exozippy-modelfiles <config>` rewrites
+    # them from the saved trace.
+    wrapup.stage("model files")
+    from .outputs.model_files import write_model_files
+    from .outputs.summary_plot import median_draw_point
+
+    median_point, _, _ = median_draw_point(system, idata)
+    write_model_files(system, median_point, prefix, "mcmc")
 
     # Multimodal posteriors: re-emit the same corner + component plots once
     # per mode, restricted to that mode's draws (interim solution; a
@@ -3693,6 +3714,9 @@ def _emit_per_mode_outputs(system, idata, mode_report, prefix):
     evaluations), so each mode's wall-clock cost is logged -- a slow
     per-mode loop should be visible in logs, not silent.
     """
+    from .outputs.model_files import write_model_files
+    from .outputs.summary_plot import median_draw_point
+
     prefix = str(prefix)
     param_lookup = system.get_parameter_lookup()
     report_only = set(system.report_only_labels())
@@ -3715,6 +3739,9 @@ def _emit_per_mode_outputs(system, idata, mode_report, prefix):
             comp.plot(
                 system, draws_k, filename_prefix=f"{prefix}_mcmc_{suffix}"
             )
+        # The mode's model files at its own median draw.
+        point_k, _, _ = median_draw_point(system, idata_k)
+        write_model_files(system, point_k, prefix, f"mcmc_{suffix}")
 
         logger.info(
             f"Per-mode outputs for {suffix} (weight={m.weight:.3f}, "

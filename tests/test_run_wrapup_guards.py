@@ -407,6 +407,18 @@ def test_the_summary_figure_announces_itself():
     assert any("summary figure" in label for label in labels), labels
 
 
+def test_the_model_files_announce_themselves():
+    """
+    Given the wrap-up (_wrap_up),
+    When its wrapup.stage labels are read out of the source,
+    Then the EXOFASTv2-compatible model files have one -- the label a
+      failure there is reported against.
+    """
+    labels = _wrapup_stage_labels("_wrap_up")
+
+    assert "model files" in labels, labels
+
+
 def test_an_interrupt_during_wrapup_says_what_survived(caplog, monkeypatch):
     """
     Given a fit interrupted during WRAP-UP rather than during sampling,

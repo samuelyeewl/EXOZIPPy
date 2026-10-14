@@ -105,3 +105,63 @@ def write_model_files(system, point, prefix, tag):
         "Wrote %d model files (%s) to %s", len(texts), tag, outdir.resolve()
     )
     return written
+
+
+def create_model_files(config_file, *, start=False):
+    """Write a finished fit's model files from its config and saved trace.
+
+    ``config_file`` is the system YAML the fit ran with: it rebuilds the
+    System and its ``prefix:`` locates ``<prefix>_trace.nc``, which must
+    belong to the model the config builds (``check_trace_freshness``).
+    Relative paths resolve against the config's own directory, wherever
+    this is called from -- as ``summary_plot.create_summary_plot`` does.
+
+    Writes the ``mcmc`` set at the median draw of the reported posterior
+    (``summary_plot.reported_posterior`` + ``median_draw_point``, exactly
+    what the live fit's wrap-up writes), and with ``start=True`` also the
+    ``start`` set at the build start.  The ``polished`` set needs the seed
+    polish, i.e. the fit itself, and is not reproducible from here.
+    Returns the written paths (absolute).
+    """
+    import contextlib
+
+    import arviz as az
+
+    from ..system import System
+    from ..trace_meta import check_trace_freshness
+    from ..yamlio import load_system_config
+    from .summary_plot import (
+        DEFAULT_PREFIX,
+        median_draw_point,
+        reported_posterior,
+    )
+
+    config_path = Path(config_file).expanduser().resolve()
+    with contextlib.chdir(config_path.parent):
+        config = load_system_config(config_path.name)
+        prefix = Path(config.get("prefix", DEFAULT_PREFIX))
+        trace_path = Path(f"{prefix}_trace.nc")
+        if not trace_path.exists():
+            raise FileNotFoundError(
+                f"No saved trace at {trace_path.resolve()}.  The mcmc model "
+                f"files are written from a finished fit; run `exozippy "
+                f"{config_path.name}` first."
+            )
+
+        system = System(config)
+        system.prepare()
+        model = system.build_model()
+
+        written = []
+        if start:
+            build_start = system.get_internal_point(
+                model, system.get_raw_start(model)
+            )
+            written += write_model_files(system, build_start, prefix, "start")
+
+        idata = az.from_netcdf(str(trace_path))
+        check_trace_freshness(idata, system, trace_path)
+        posterior = reported_posterior(system, model, idata)
+        point, _, _ = median_draw_point(system, posterior)
+        written += write_model_files(system, point, prefix, "mcmc")
+        return [p.resolve() for p in written]

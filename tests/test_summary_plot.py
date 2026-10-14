@@ -1723,3 +1723,54 @@ def test_cli_writes_the_figure_with_an_options_file(kelt4_fit, tmp_path):
 
     assert result.exit_code == 0, result.output + repr(result.exception)
     assert out.stat().st_size > 0
+
+
+# ---------------------------------------------------------------------------
+# The EXOFASTv2-compatible model files the same fit writes
+# (outputs/model_files.py; the per-component numbers are pinned in
+# tests/test_model_files_*.py).  Here because they need a finished fit, and
+# this module already has one.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.slow
+def test_every_fit_writes_its_model_files(kelt4_fit):
+    """
+    Given a fit run through run_fit (prefix fitresults/KELT-4A),
+    When it finishes,
+    Then fitresults/modelfiles/ holds its start and mcmc sets in EXOFASTv2's
+      names, and the index of its numbered datasets.
+    """
+    outdir = kelt4_fit.parent / "fitresults" / "modelfiles"
+
+    names = {p.name for p in outdir.iterdir()}
+
+    for tag in ("start", "mcmc"):
+        assert f"KELT-4A.{tag}.model.transit_000.txt" in names
+        assert f"KELT-4A.{tag}.residuals.telescope_00.txt" in names
+        assert f"KELT-4A.{tag}.prettymodelrv.planet.00.txt" in names
+    assert "KELT-4A.index.txt" in names
+
+
+@pytest.mark.slow
+def test_cli_rewrites_the_fits_mcmc_model_files_identically(kelt4_fit):
+    """
+    Given the finished fit and the mcmc model files its wrap-up wrote,
+    When exozippy-modelfiles runs on its config with --start,
+    Then it exits cleanly and the rewritten mcmc files are byte-identical:
+      the CLI rebuilds the same reported posterior and the same median draw
+      the live wrap-up used.
+    """
+    from exozippy import cli_modelfiles
+
+    outdir = kelt4_fit.parent / "fitresults" / "modelfiles"
+    before = {p.name: p.read_text() for p in outdir.glob("KELT-4A.mcmc.*.txt")}
+    assert before
+
+    result = CliRunner().invoke(
+        cli_modelfiles.main, [str(kelt4_fit), "--start"]
+    )
+
+    assert result.exit_code == 0, result.output + repr(result.exception)
+    after = {p.name: p.read_text() for p in outdir.glob("KELT-4A.mcmc.*.txt")}
+    assert after == before
