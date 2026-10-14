@@ -1448,6 +1448,11 @@ class Instrument(TimeSystem, Component):
                 f"plots can invert exactly what the likelihood scored "
                 f"(components/instrument.md, 'One detrend mechanism')."
             )
+        # Retained for mu_at_data / sigma_at_data: the exact mean and scale
+        # the likelihood is about to score, whatever family scores them.
+        self._observation_mu_node = mu
+        self._observation_sigma_node = sigma
+        self._mu_sigma_fn = None  # a rebuild must not reuse the old compile
         if system is not None:
             self._add_observation_prose(system)
         if not (self.has_gp or self.has_robust_likelihood):
@@ -1588,6 +1593,58 @@ class Instrument(TimeSystem, Component):
         return np.asarray(
             self._gp_pred_on_grid[i](t_grid, *values), dtype=float
         )
+
+    # ------------------------------------------------------------------
+    # The likelihood's own mean and scale at the observations
+    # ------------------------------------------------------------------
+    def _mu_sigma_at_data(self, system, point):
+        """``(mu, sigma)`` the likelihood scores at every observation.
+
+        Both are the very nodes ``add_observation_likelihood`` was handed
+        (mu: the full model with the detrend applied, sigma: the error with
+        the jitter or err_scale applied), compiled against
+        ``system.plot_params`` -- so nothing here re-derives a term the
+        likelihood computes (instrument.md, "The plotted model IS the
+        likelihood code").  Compiled on first use and cached: a run that
+        never asks pays no compile.  ``(n_total_obs,)`` each, internal units,
+        concatenated data order.  A GP's conditional mean is NOT in mu (the
+        likelihood conditions on it, it does not add it); add
+        ``gp_mean_at_data`` for that.
+        """
+        fn = getattr(self, "_mu_sigma_fn", None)
+        if fn is None:
+            mu = getattr(self, "_observation_mu_node", None)
+            sigma = getattr(self, "_observation_sigma_node", None)
+            if mu is None or sigma is None:
+                raise RuntimeError(
+                    f"[{self.prefix}] mu_at_data/sigma_at_data need the "
+                    f"nodes add_observation_likelihood retains; this "
+                    f"component never called it (or the model is not "
+                    f"built)."
+                )
+            import pytensor
+
+            fn = pytensor.function(
+                inputs=[p.value for p in system.plot_params],
+                outputs=[mu, sigma],
+                on_unused_input="ignore",
+            )
+            self._mu_sigma_fn = fn
+        values = self._point_to_plot_params(point, system)
+        mu, sigma = fn(*values)
+        return np.asarray(mu, dtype=float), np.asarray(sigma, dtype=float)
+
+    def mu_at_data(self, system, point):
+        """The likelihood's mu at every observation (detrend included, GP
+        excluded), ``(n_total_obs,)``, internal units."""
+        return self._mu_sigma_at_data(system, point)[0]
+
+    def sigma_at_data(self, system, point):
+        """The likelihood's per-observation sigma (data error with the
+        jitter or err_scale applied), ``(n_total_obs,)``, internal units.
+        A negative jitter variance makes it SMALLER than the quoted error
+        ("The signed jitter"); it is reported as scored, never clamped."""
+        return self._mu_sigma_at_data(system, point)[1]
 
     # ------------------------------------------------------------------
     # Optional per-file robust likelihood (hogg mixture / Student-t)

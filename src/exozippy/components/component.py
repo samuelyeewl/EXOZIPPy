@@ -1165,6 +1165,18 @@ class Component(ABC):
         """
         return {}
 
+    def model_files(self, system, point):
+        """The EXOFASTv2-compatible text files this component owns at
+        ``point`` (an internal-unit point dict, as ``plot_data`` takes): a
+        list of ``exozippy.modelfile.ModelFile``, which
+        ``outputs/model_files.py`` writes to the fit's ``modelfiles/``
+        directory.  Which quantity each file holds, in which unit and
+        format, is the component's to decide -- EXOFASTv2's definitions are
+        in ``docs/model_files_plan.md``.  The default -- a component
+        EXOFASTv2 writes nothing for -- returns [].
+        """
+        return []
+
     def _point_to_plot_params(self, point, system):
         """
         Marshal a point dict into the positional argument list the
