@@ -1,6 +1,7 @@
 # Model files: EXOFASTv2-compatible model and residual text files (plan)
 
-Status (2026-10-14): PLAN, not implemented. The open decisions are settled (section 8).
+Status (2026-10-14): IMPLEMENTED. The decisions are in section 8; sections 4, 6 and 9
+record where the build differs from the plan.
 
 **Summary.** EXOFASTv2 writes the model, residuals and "pretty" model of every dataset as
 plain text, so users can make their own figures without rebuilding the model. EXOZIPPy
@@ -18,7 +19,7 @@ reported posterior. A console script also writes them from a finished fit's save
 
 EXOFASTv2's model files differ between branches, so the reference has to be pinned:
 
-| | `master` (2022-07) | `samsmods` (f419edcd, made `examples/toi2876/d0647`) | `linkpars_current` (60909ec9, 2026-01) |
+| | `master` (2022-07) | `samsmods` fork (f419edcd) | `linkpars_current` (60909ec9, 2026-01) |
 |---|---|---|---|
 | directory | beside the PDFs | beside the PDFs | **`modelfiles/` subdirectory** |
 | dataset index | `transit_%03d`, `telescope_%02d` | unpadded (`transit_0`) | `transit_%03d`, `telescope_%02d` |
@@ -218,16 +219,18 @@ handled within the components", CLAUDE.md), and the writer is generic.
   failure RAISES, naming the component and the file. It then rewrites the index. It names
   no component; the `tests/test_summary_plot.py` yaml_key-literal scan is copied over to
   enforce that.
-- **The likelihood's full mu at the data, compiled once in the base.** `Instrument` gains
-  `mu_at_data(system, point)`, compiled in `compile_plotters` from the
-  `_likelihood_mu_node` that `_detrended_model` already retains. That node is the scored
-  quantity, so the detrend comes from the one base mechanism (instrument.md, "One detrend
-  mechanism"), and no child rebuilds the forward map by hand. RV and transit both use it;
-  `gp_mean_at_data` is added on top, as the plots do. Next to it, `sigma_at_data(system,
-  point)` is compiled from the sigma the likelihood scores (`total_sigma`'s node). It
-  serves the RV residuals' fourth column, and a later file can reuse it. Both accessors
-  are base-owned, for the reason the detrend mechanism is: a child cannot drift from its
-  own likelihood.
+- **The likelihood's full mu and sigma at the data, in the base.** As built,
+  `add_observation_likelihood` -- the one dispatcher every instrument's likelihood goes
+  through -- retains the `mu` and `sigma` it is handed, and `Instrument.mu_at_data` /
+  `sigma_at_data` compile them against `plot_params` LAZILY, on first use, so a run (or a
+  GUI session) that never writes model files pays no extra compile; a rebuild resets the
+  cache. (The plan said `compile_plotters` and `_likelihood_mu_node`; retaining at the
+  dispatcher covers sigma too, and every child at once.) Those are the scored quantities,
+  so the detrend comes from the one base mechanism (instrument.md, "One detrend
+  mechanism") and no child rebuilds the forward map by hand. RV and transit both use them;
+  `gp_mean_at_data` is added on top, as the plots do. `sigma_at_data` serves the RV
+  residuals' fourth column. Both accessors are base-owned, for the reason the detrend
+  mechanism is: a child cannot drift from its own likelihood.
 - **Stale files.** Before writing a tag, remove that tag's previous files
   (`<base>.*` in `modelfiles/`), so a rerun with fewer datasets leaves no orphans.
   EXOFASTv2 does the same for the detrended models (`plottran.pro:162-163`). The glob is
@@ -255,19 +258,21 @@ the luckiest draw.
   nothing (`run.md`, "A fit has three phases"). Add it to
   `tests/test_run_wrapup_guards.py`. `recompute_trace: false` reruns go through
   `_wrap_up`, so they rewrite the set.
-- **Per mode** (`_per_mode_outputs`, ~line 3708): `mcmc_<mode_suffix(k)>` at
-  `median_draw_point(system, _idata_for_mode(idata, k))`. **Check first** that
-  `median_draw_point` behaves on a single-mode subset. If it does not, this bullet ships
-  later.
+- **Per mode** (`_emit_per_mode_outputs`): `mcmc_<mode_suffix(k)>` at
+  `median_draw_point(system, _idata_for_mode(idata, k))`. Checked: `_idata_for_mode`
+  returns a one-chain posterior of the mode's own draws, with no `mode` variable, which is
+  the shape `median_draw_point` reads, so it shipped with the rest.
 - **`exozippy-modelfiles <config.yaml>`** (`cli_modelfiles.py`, modeled on
   `cli_summary.py`), with `outputs.model_files.create_model_files(config_file)` modeled on
   `create_summary_plot`. It chdirs to the config's directory, builds the System
   (`prepare()` then `build_model()`), loads `<prefix>_trace.nc`, runs
   `check_trace_freshness`, `reported_posterior` and `median_draw_point`, then writes
-  `mcmc`. `--start` / `--polished` add those sets. Logging goes to the console only (the
-  `<prefix>.log` reason in `cli_summary.py`). Register it in `[project.scripts]` and add it
-  to CLAUDE.md's Commands block. This gives existing fits their files without
-  re-sampling.
+  `mcmc`. `--start` adds the start set. There is no `--polished`: the polished point is
+  the seed polish's result, i.e. the fit itself, and cannot be rebuilt from the config.
+  Logging goes to the console only (the `<prefix>.log` reason in `cli_summary.py`).
+  Registered in `[project.scripts]`. This gives existing fits their files without
+  re-sampling, and its `mcmc` files are byte-identical to the ones the live wrap-up wrote
+  (`tests/test_summary_plot.py`).
 
 ## 7. Known differences from EXOFASTv2 (documented, not bugs)
 
@@ -310,37 +315,56 @@ the luckiest draw.
 5. **Atmosphere files use the model's own wavelengths.** Interpolating onto EXOFASTv2's
    0.001-um grid would match the row count but invent resolution the model does not have.
 
-## 9. Tests (`tests/test_model_files.py` unless noted)
+## 9. Tests (as built)
 
-1. **Format parity.** For every file kind, each written line matches a regex built from
-   EXOFASTv2's IDL format (e.g. `^-?\d+\.\d{8} -?\d+\.\d{6}$` for `model.transit`), with
-   no header where EXOFASTv2 has none. The SED file's comment line and `a20` field are
-   checked byte-for-byte against a line from a real `linkpars_current` run, committed as a
-   tiny fixture.
-2. **Names.** For a two-transit, two-RV, two-planet fixture, the exact set of filenames
-   (padding included) under `modelfiles/`. A duplicate file name and unequal column
-   lengths each RAISE.
-3. **Numbers.** `model.transit + residuals == flux` and `model.telescope + residuals ==
-   rv`, exactly before formatting. `model.*` equals `mu_at_data + gp`, and `mu_at_data`
-   equals the likelihood's mu (parity against `_likelihood_mu_node` compiled directly).
-   `baseline + sum_j detrendedmodel.transit.planet_j == mu_at_data` with no detrending.
-   `detrendedmodel.telescope + trend.telescope == model.telescope` with no detrending or
-   GP. The fourth `residuals.telescope` column equals the likelihood's scored sigma
-   (parity against `total_sigma`'s node). With a negative `jitter_variance` it is below
-   the raw error, which pins that nothing clamps it. The pretty transit term equals `_lc_at_times` (parity, as in
-   `tests/test_model_builder_parity.py`).
-4. **Units.** An RV file declared in km/s is written in m/s. A file with `time_offset:` is
-   written in full BJD_TDB.
-5. **Grids.** The transit and RV pretty grids equal EXOFASTv2's formulas for hand-checked
-   inputs.
-6. **Component-agnostic writer.** The yaml_key-literal scan, plus a made-up non-astronomy
-   component whose hook returns one file.
-7. **Run integration.** `tests/test_run_wrapup_guards.py` covers the new stage. A CLI smoke
-   test writes `mcmc` from a finished-fit fixture, and a missing trace raises.
-8. **Manual check, not CI.** On `examples/toi2876`, compare the EXOZIPPy files with the
-   EXOFASTv2 run in `examples/toi2876/d0647/fitresult` (a `samsmods` run: unpadded names,
-   no subdirectory). Columns should agree to within the two fits' parameter differences,
-   and the SED fluxes to within the zeropoint convention.
+`tests/test_model_files.py` (the writer), `tests/test_model_files_transit_rv.py`,
+`tests/test_model_files_sed_mist.py`, and the end-to-end pair at the bottom of
+`tests/test_summary_plot.py`, which reuse its finished kelt4 fit.
+
+1. **Formats.** Every line of every transit, RV, SED and track file matches a regex built
+   from EXOFASTv2's IDL format, with no header where EXOFASTv2 has none. The SED comment
+   line and the track comment line are checked verbatim against the IDL sources. The
+   `a20` field is right-justified as Fortran's and IDL's `A` edit descriptor writes on
+   output. That is IDL's documented behaviour, NOT a comparison with a real
+   `linkpars_current` file, because no such SED file was at hand. If one turns up, a
+   one-line fixture would close that gap.
+2. **Names.** The exact EXOFASTv2 names, padding included, for kelt4 (one TESS file, four
+   RV files, one planet), and the index file. A duplicate file name, one dataset number
+   naming two datasets, unequal column lengths and a format/column count mismatch each
+   RAISE, and a raise leaves the previous set on disk intact.
+3. **Numbers.** These are exact before formatting:
+   - `model + residuals == data` for transit and RV.
+   - `model.* == mu_at_data + gp`.
+   - `baseline + detrendedmodel == model` for a light curve with no detrend.
+   - `detrendedmodel.telescope + trend.telescope == model.telescope`.
+   - The pretty transit curve at the data times equals `detrendedmodel`.
+   - The pretty RV curve equals `_rv_at_times` for the reference instrument.
+   - The spline file equals `1 + term / baseline`, at non-zero coefficients.
+   - The SED's `log10(flux / model)` is the row's scored magnitude residual (with the
+     differential side convention), its error is EXOFASTv2's.
+   - The atmospheres are the chart's spectra.
+   - The MIST track is `interpolate_track` at the Kiel node's mass and [Fe/H], past the
+     chart's EEP window.
+
+   `mu_at_data`/`sigma_at_data` reproduce PyMC's own logp of the observed RVs, and the RV
+   fourth column is `sqrt(err^2 + jitter_variance)` and stays BELOW the raw error at a
+   negative variance.
+4. **Units.** The RV error column equals the RV file's own error column (m/s, with no
+   constant in the test), and a km/s file is written in m/s. Times are the internal
+   BJD_TDB the instruments hold; a `time_offset:` file is not separately tested.
+5. **Grids.** The RV pretty grid is hand-checked against `plotrv.pro`'s arithmetic,
+   including IDL's truncated point count over an untruncated `nsteps - 1`. The transit
+   grid's count and endpoints are checked against `plottran.pro`'s.
+6. **Component-agnostic writer.** The yaml_key-literal scan over `modelfile.py` and
+   `outputs/model_files.py`, plus a made-up pharmacokinetics component's file.
+7. **Run integration.** `tests/test_run_wrapup_guards.py` pins the wrap-up stage. The
+   finished kelt4 fit has written its `start` and `mcmc` sets and the index, and
+   `exozippy-modelfiles --start` rewrites the `mcmc` files byte-identically. The
+   missing-trace message is not separately tested.
+8. **Manual check, not CI.** Compare a fit's files with an EXOFASTv2 fit of the same
+   system. Columns should agree to within the two fits' parameter differences, and the
+   SED fluxes to within the zeropoint convention. A `samsmods` run has unpadded names and
+   no subdirectory, so match by dataset, not by file name.
 
 ## 10. Docs
 
@@ -351,7 +375,8 @@ the luckiest draw.
 - `components/instrument.md`: `mu_at_data` and `sigma_at_data`, next to the retained
   nodes they compile.
 - `run.md`: the new wrap-up stage and the start/polished sets.
-- CLAUDE.md: `exozippy-modelfiles` in Commands.
+- CLAUDE.md: the outputs line of the subsystem map names model files; README step 6
+  documents `exozippy-modelfiles`.
 
 ## 11. Commit order
 

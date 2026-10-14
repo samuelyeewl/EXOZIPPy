@@ -167,6 +167,18 @@ and use it as a template. Generically:
 
    `--help` lists the other options, such as binning the transits.
 
+6. For your own figures, the fit also writes EXOFASTv2-compatible text files
+   to `modelfiles/` beside the prefix: each dataset's model and residuals,
+   the per-planet transit and RV model curves on a fine grid, the SED
+   residuals and model spectra, and the MIST track, in EXOFASTv2's names,
+   units and formats (`modelfiles/<name>.index.txt` says which numbered
+   file is which dataset). A fit that predates them gets them from its
+   saved trace with
+
+   ```bash
+   exozippy-modelfiles toi1234.yaml
+   ```
+
 ### Step 5 -- Helper commands for Step 4
 
 EXOZIPPy installs three commands that do much of items 1-3 of Step 4 for you. Run each
