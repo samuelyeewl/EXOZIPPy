@@ -500,6 +500,7 @@ class Transit(Instrument):
             self.exptime_min[i] = exptime
             self.ninterp[i] = ninterp
 
+        self.n_spline_cols = [0] * self.n_elements
         blocks = self._concat_blocks()
         for i in range(self.n_elements):
             # Shared reader: columns:, mask:, time_* conversion, then one
@@ -513,10 +514,13 @@ class Transit(Instrument):
 
             # fitspline: the spline columns join this file's detrend block;
             # without it the accumulator reads the block off df exactly as
-            # before (the backward-compatible path, untouched).
+            # before (the backward-compatible path, untouched).  They are the
+            # block's LAST columns; how many is kept so the model files can
+            # write the spline's own term (spline.transit_*).
             detrend = None
             if self.fitspline[i]:
                 detrend = self._spline_columns(i, df)
+                self.n_spline_cols[i] = detrend.shape[1] - (df.shape[1] - 3)
 
             blocks.add(
                 i,
@@ -1942,6 +1946,113 @@ class Transit(Instrument):
         from exozippy.plotrender import plot_via_specs
 
         plot_via_specs(self, system, points, filename_prefix=filename_prefix)
+
+    def model_files(self, system, point):
+        """EXOFASTv2's transit model files at ``point``
+        (``docs/model_files_plan.md`` section 3.1; exofast_chi2v2.pro and
+        plottran.pro on linkpars_current).
+
+        Per file ``i`` (``transit_%03d``, config order), in the data file's
+        own flux units and BJD_TDB:
+
+        ``model``      the likelihood's mu at the data (detrend included)
+                       plus any GP conditional mean -- the GP stands where
+                       EXOFASTv2's spline does, inside the model, so the
+                       residuals are what is left.
+        ``residuals``  data minus that model, and the RAW error (as
+                       EXOFASTv2 writes ``transit.err``).
+        ``detrendedmodel.planet_%02d``  planet p's term at the data, from
+                       the likelihood's own ``(N_obs, N_planets)`` node: its
+                       step in the running model, so ``baseline +
+                       sum_p term_p`` is the detrend-free model.
+        ``prettymodel.planet_%02d``  the same term on EXOFASTv2's grid, one
+                       point per minute from a day before the file's first
+                       point to a day after its last, smeared over the file's
+                       own exposure (``_lc_at_times``).
+        ``spline``     ``1 + spline term / baseline``, for ``fitspline:``
+                       files: EXOFASTv2's spline is a multiplicative norm,
+                       EXOZIPPy's is additive detrend columns, and the two
+                       agree to first order.
+        ``gp``         the GP conditional mean at the data, for GP files (an
+                       EXOZIPPy addition; it is already inside ``model``).
+        """
+        from exozippy.modelfile import F6, F8, F10, ModelFile
+
+        param_values = self._point_to_plot_params(point, system)
+        mu = self.mu_at_data(system, point)
+        gp = self.gp_mean_at_data(system, point)
+        full = mu + gp
+        _, terms = self._eval_lc_data(param_values)
+        n_planets = terms.shape[1]
+        coeffs = (
+            self._point_value(point, self.detrend_coeffs)
+            if self.total_detrend_cols
+            else np.zeros(0)
+        )
+        col_start = np.concatenate([[0], np.cumsum(self.n_detrend_per_inst)])
+
+        files = []
+        for i in range(self.n_elements):
+            rows = self.rows(i)
+            tag = f"transit_{i:03d}"
+            ds = (tag, f"{self.names[i]}  {self.files[i]}")
+            t = self.time[rows]
+
+            files.append(
+                ModelFile(
+                    f"model.{tag}", [t, full[rows]], [F8, F6], dataset=ds
+                )
+            )
+            files.append(
+                ModelFile(
+                    f"residuals.{tag}",
+                    [t, self.flux[rows] - full[rows], self.err[rows]],
+                    [F8, F6, F6],
+                    dataset=ds,
+                )
+            )
+
+            lo, hi = float(t.min()) - 1.0, float(t.max()) + 1.0
+            n_pretty = int(np.ceil((hi - lo) * 1440.0))
+            t_pretty = lo + (hi - lo) * np.arange(n_pretty) / (n_pretty - 1.0)
+            _, pretty = self._lc_at_times(param_values, i, t_pretty)
+            for p in range(n_planets):
+                ptag = f"{tag}.planet_{p:02d}"
+                files.append(
+                    ModelFile(
+                        f"detrendedmodel.{ptag}",
+                        [t, terms[rows, p]],
+                        [F10, F10],
+                        dataset=ds,
+                    )
+                )
+                files.append(
+                    ModelFile(
+                        f"prettymodel.{ptag}",
+                        [t_pretty, pretty[:, p]],
+                        [F10, F10],
+                        dataset=ds,
+                    )
+                )
+
+            if self.fitspline[i]:
+                stop = col_start[i + 1]
+                cols = slice(stop - self.n_spline_cols[i], stop)
+                spline_term = self.detrend_matrix[rows, cols] @ coeffs[cols]
+                baseline = self._point_value(point, self.baseline, i)
+                files.append(
+                    ModelFile(
+                        f"spline.{tag}",
+                        [t, 1.0 + spline_term / baseline],
+                        [F8, F6],
+                        dataset=ds,
+                    )
+                )
+            if i in self._gp_obs_index:
+                files.append(
+                    ModelFile(f"gp.{tag}", [t, gp[rows]], [F8, F6], dataset=ds)
+                )
+        return files
 
     #: A band whose filter is this one is TESS: on the summary figure its
     #: files share one row per exposure time (cadence).  Filter names are

@@ -1249,6 +1249,159 @@ class RVInstrument(Instrument):
 
         plot_via_specs(self, system, points, filename_prefix=filename_prefix)
 
+    def model_files(self, system, point):
+        """EXOFASTv2's RV model files at ``point``
+        (``docs/model_files_plan.md`` section 3.2; exofast_chi2v2.pro and
+        plotrv.pro on linkpars_current).
+
+        Everything is in m/s, whatever unit the RV files were given in, and
+        BJD_TDB.  A Taylor orbit (``type: linear | quadratic``) is
+        EXOFASTv2's slope/quad, so "planets" below are the Keplerian columns
+        of the model matrix and "trend" the Taylor ones.
+
+        Per file ``i`` (``telescope_%02d``, config order):
+
+        ``model``          the likelihood's mu at the data (gamma, every
+                           orbit, the detrend) plus any GP conditional mean.
+        ``residuals``      data minus that model, the RAW error, then a
+                           fourth column: the sigma the likelihood scored,
+                           with the jitter in quadrature.  The jitter is
+                           signed, so where its variance is negative the
+                           fourth column is below the raw error; it is
+                           reported as scored, never clamped.
+        ``detrendedmodel`` the Keplerian columns at the data (an RM file's
+                           anomaly on its own rows, as scored): no gamma,
+                           trend or detrend.
+        ``trend``          gamma plus the Taylor columns at the data.
+        ``gp``             the GP conditional mean at the data, for GP files
+                           (an EXOZIPPy addition; already inside ``model``).
+
+        And on EXOFASTv2's pretty grid (100 points per shortest Keplerian
+        period over the data span, widened as plotrv.pro widens it), for
+        the reference instrument (``_plot_layout``):
+
+        ``prettymodelrv.planet.%02d``  planet p's orbit column.
+        ``prettymodelrv.trend``        the sum of the Keplerian columns,
+                           then the sum of the Taylor columns.  (EXOFASTv2's
+                           second column is the LAST planet's curve, a
+                           leftover of its planet loop; the sum is the same
+                           for one planet.)
+
+        A star with no Keplerian orbit gets no pretty files: the grid's
+        cadence is a period.
+        """
+        from exozippy.modelfile import F6, F8, F10, ModelFile
+
+        ms = float((u.solRad / u.d).to(u.m / u.s))
+        param_values = self._point_to_plot_params(point, system)
+        mu = self.mu_at_data(system, point)
+        sigma = self.sigma_at_data(system, point)
+        gp = self.gp_mean_at_data(system, point)
+        full = mu + gp
+        matrix = np.asarray(self._rv_data_fn(*param_values))
+        taylor = np.array(
+            [system.orbit.is_taylor[int(o)] for o in self._plot_orbit_map],
+            dtype=bool,
+        )
+        planets_at = matrix[:, ~taylor].sum(axis=1)
+        trend_at = matrix[:, taylor].sum(axis=1)
+
+        files = []
+        for i in range(self.n_elements):
+            rows = self.rows(i)
+            tag = f"telescope_{i:02d}"
+            ds = (tag, f"{self.names[i]}  {self.files[i]}")
+            t = self.time[rows]
+            gamma = self._point_value(point, self.gamma, i)
+            files += [
+                ModelFile(
+                    f"model.{tag}", [t, full[rows] * ms], [F8, F6], dataset=ds
+                ),
+                ModelFile(
+                    f"residuals.{tag}",
+                    [
+                        t,
+                        (self.rv[rows] - full[rows]) * ms,
+                        self.err[rows] * ms,
+                        sigma[rows] * ms,
+                    ],
+                    [F8, F6, F6, F6],
+                    dataset=ds,
+                ),
+                ModelFile(
+                    f"detrendedmodel.{tag}",
+                    [t, planets_at[rows] * ms],
+                    [F8, F6],
+                    dataset=ds,
+                ),
+                ModelFile(
+                    f"trend.{tag}",
+                    [t, (gamma + trend_at[rows]) * ms],
+                    [F8, F6],
+                    dataset=ds,
+                ),
+            ]
+            if i in self._gp_obs_index:
+                files.append(
+                    ModelFile(
+                        f"gp.{tag}", [t, gp[rows] * ms], [F8, F6], dataset=ds
+                    )
+                )
+
+        p_min = self._shortest_period(system, point)
+        if p_min is None:
+            return files
+        t_pretty = self._exofast_pretty_rv_grid(p_min)
+        _, pretty = self._rv_at_times(
+            param_values, self._rv_layout[0], t_pretty
+        )
+        # A planet component is legitimately absent in a stellar-binary fit.
+        planets = getattr(system, "planet", None)
+        n_planets = planets.n_elements if planets is not None else 0
+        for p in range(n_planets):
+            cols = np.flatnonzero(
+                (self._plot_orbit_map == int(planets.orbit_map[p])) & ~taylor
+            )
+            if cols.size == 0:
+                # This planet's orbit does not move the observed star.
+                continue
+            files.append(
+                ModelFile(
+                    f"prettymodelrv.planet.{p:02d}",
+                    [t_pretty, pretty[:, cols[0]] * ms],
+                    [F10, F10],
+                )
+            )
+        files.append(
+            ModelFile(
+                "prettymodelrv.trend",
+                [
+                    t_pretty,
+                    pretty[:, ~taylor].sum(axis=1) * ms,
+                    pretty[:, taylor].sum(axis=1) * ms,
+                ],
+                [F10, F10, F10],
+            )
+        )
+        return files
+
+    def _exofast_pretty_rv_grid(self, p_min):
+        """EXOFASTv2's pretty RV time grid (plotrv.pro), reproduced exactly.
+
+        The data span is widened about a round epoch ``bjd0`` (the span's
+        digit count sets the rounding), sampled at ``p_min / 100``, and --
+        as IDL's ``dindgen(nsteps)`` with a non-integer ``nsteps`` does --
+        the point count is truncated while the spacing still divides by
+        ``nsteps - 1``.
+        """
+        t_min, t_max = float(self.time.min()), float(self.time.max())
+        roundto = 10.0 ** len(str(int(np.floor(t_max - t_min))))
+        bjd0 = np.floor(t_min / roundto) * roundto
+        lo = (t_min - bjd0) * 0.95 + bjd0
+        hi = (t_max - bjd0) * 1.05 + bjd0
+        nsteps = (hi - lo) / (p_min / 100.0)
+        return lo + (hi - lo) * np.arange(int(nsteps)) / (nsteps - 1.0)
+
     def plot_data(self, system, point=None):
         """
         GUI charts for the RV instrument: one unphased RV-vs-time
