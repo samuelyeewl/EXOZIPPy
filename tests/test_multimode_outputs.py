@@ -179,17 +179,23 @@ def test_emit_per_mode_outputs_calls_component_plot_per_mode(tmp_path):
     Given a two-mode trace and a fake system with one recording component,
     When _emit_per_mode_outputs runs,
     Then comp.plot is called once per mode with a mode-specific
-      filename_prefix and a draws list restricted to that mode.
+      filename_prefix and a draws list restricted to that mode, and the
+      component's model files are asked for once per mode, at one point.
     """
     rng = np.random.default_rng(6)
     idata = _two_mode_idata(rng)
     rep = identify_modes(idata)
 
     calls = []
+    model_file_points = []
 
     class _RecordingComponent:
         def plot(self, system, points, filename_prefix="debug"):
             calls.append((filename_prefix, points))
+
+        def model_files(self, system, point):
+            model_file_points.append(point)
+            return []
 
     class _SystemWithComponent(_FakeSystem):
         active_components = {"dummy": _RecordingComponent()}
@@ -207,6 +213,8 @@ def test_emit_per_mode_outputs_calls_component_plot_per_mode(tmp_path):
     )
     for _, points in calls:
         assert len(points) > 0
+    assert len(model_file_points) == 2
+    assert all(isinstance(p, dict) and p for p in model_file_points)
 
 
 # ----------------------------------------------------------------------
