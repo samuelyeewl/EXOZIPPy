@@ -198,6 +198,16 @@ def plot_class_from(module, plot_path):
     return candidates[0]
 
 
+def _exofast_star_indices(pos, neg):
+    """EXOFASTv2's sed.residuals star-index string (mistmultised.pro): the
+    0-based stars a row adds, comma-joined, then ``-`` and the stars it
+    subtracts -- ``"0,1"`` for a blend, ``"0-1"`` for a differential row,
+    ``"-1"`` with no positive side."""
+    pos_str = ",".join(str(int(i)) for i in pos)
+    neg_str = ",".join(str(int(i)) for i in neg)
+    return pos_str + ("-" + neg_str if neg_str else "")
+
+
 class SED(Component):
     """
     Spectral Energy Distribution likelihood driven by a precomputed
@@ -2492,6 +2502,103 @@ class SED(Component):
                 },
             )
         ]
+
+    #: EXOFASTv2's sed.residuals comment line (mistmultised.pro), verbatim.
+    MODEL_FILE_SED_COMMENT = (
+        "# Filtername, Center wavelength (um), half bandpass (um), flux, "
+        "error, modelflux, residuals (erg/s/cm^2), star indices"
+    )
+
+    def model_files(self, system, point):
+        """EXOFASTv2's SED model files at ``point``
+        (``docs/model_files_plan.md`` section 3.4; mistmultised.pro and
+        exofast_chi2v2.pro on linkpars_current).
+
+        ``sed.residuals``  one row per photometric measurement: the filter,
+            its effective wavelength and half its effective width (micron),
+            then the observed and model lambda*F_lambda, the error and
+            observed - model (erg/s/cm^2), then EXOFASTv2's star-index
+            string (``0,1`` for a blend, ``0-1`` for a differential row).
+            The fluxes are this component's own -- the ones its chart
+            draws, through the per-filter Vega zero points -- so they differ
+            from EXOFASTv2's AB-zeropoint fluxes at the zero-point level
+            while the columns and units agree.  A differential row is
+            written for its NEGATIVE side, anchored on the model flux of the
+            positive one, as EXOFASTv2 writes it ("only plot the fainter
+            star").  The error is ``flux * ln(10) / 2.5 * mag error``, the
+            raw magnitude error with no errscale, as EXOFASTv2 computes it.
+        ``atmosphere.%03d``  each star's extincted model lambda*F_lambda at
+            Earth (erg/s/cm^2) on the model's own wavelengths (micron).
+        """
+        from exozippy.modelfile import E6, F6, ModelFile, a_field
+
+        if self.nfilters == 0:
+            # No photometry rows: this SED only serves flux predictions.
+            return []
+        if getattr(self, "_compiled_mag_predictors", None) is None:
+            raise RuntimeError(
+                f"[{self.prefix}] the SED plotters are not compiled; the "
+                f"model files need the model's predicted magnitudes."
+            )
+        plot_obj = self._make_plot_obj(system, [point])
+        mag_pred = plot_obj.mag_pred_draws[0]  # (nstars, nfilters)
+
+        names, wave, half, flux, err, model, stars = ([] for _ in range(7))
+        for row, filt in enumerate(self.filters):
+            params = plot_obj.filter_params[filt]
+            if params["width_eff"] is None:
+                raise ValueError(
+                    f"[{self.prefix}] filter {filt!r} has no effective "
+                    f"width (SVO WidthEff), which sed.residuals' half-"
+                    f"bandpass column needs."
+                )
+            bm = self.blend_matrix[row]
+            pos = np.flatnonzero(bm > 0)
+            neg = np.flatnonzero(bm < 0)
+            zp = params["zp"]
+            lam = params["wave_eff"]  # angstrom
+            m_obs = self.mag[row]
+            if neg.size:
+                # mag = -2.5 log10(F_pos / F_neg): the negative side's flux
+                # from the model's positive side.
+                anchor = np.sum(zp * 10 ** (-0.4 * mag_pred[pos, row]))
+                f_obs = anchor * 10 ** (0.4 * m_obs)
+                f_mod = np.sum(zp * 10 ** (-0.4 * mag_pred[neg, row]))
+            else:
+                f_obs = zp * 10 ** (-0.4 * m_obs)
+                f_mod = np.sum(zp * 10 ** (-0.4 * mag_pred[pos, row]))
+            names.append(filt)
+            wave.append(lam * ANG_TO_MICRON_CONST)
+            half.append(params["width_eff"] / 2.0 * ANG_TO_MICRON_CONST)
+            flux.append(f_obs * lam)
+            err.append(f_obs * lam * np.log(10.0) / 2.5 * self.err[row])
+            model.append(f_mod * lam)
+            stars.append(_exofast_star_indices(pos, neg))
+        flux, model = np.asarray(flux), np.asarray(model)
+
+        files = [
+            ModelFile(
+                "sed.residuals",
+                [names, wave, half, flux, err, model, flux - model, stars],
+                [a_field(20), F6, F6, E6, E6, E6, E6, "%s"],
+                comment=self.MODEL_FILE_SED_COMMENT,
+            )
+        ]
+        wave_micron = np.asarray(
+            plot_obj.df_wave["wavelength_micron"], dtype=float
+        )
+        wave_ang = np.asarray(
+            plot_obj.df_wave["wavelength_angstrom"], dtype=float
+        )
+        for s in range(plot_obj.nstars):
+            files.append(
+                ModelFile(
+                    f"atmosphere.{s:03d}",
+                    [wave_micron, plot_obj.flux_model_draws[0][s] * wave_ang],
+                    [F6, E6],
+                )
+            )
+        return files
 
     def _add_magsys_prose(self, system):
         """The AB-conversion sentence, declared where the conversion is fitted.

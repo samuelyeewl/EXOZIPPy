@@ -990,6 +990,59 @@ class EvolutionaryModel(StellarRelation, Component):
                     values, star_idx, filename_prefix=filename_prefix
                 )
 
+    #: The comment line EXOFASTv2's massradius_mist.pro writes on a track.
+    MODEL_FILE_TRACK_COMMENT = "#teff, rstar, age, eep"
+
+    def model_files(self, system, point):
+        """EXOFASTv2's MIST track at ``point``, one file per constrained
+        star (``docs/model_files_plan.md`` section 3.5; massradius_mist.pro).
+
+        ``mist.%03d`` (``.track``, numbered by star index even for one
+        star): ``teff rstar age eep`` -- K, R_sun, Gyr and the EEP -- along
+        the whole track at the star's mass and initial [Fe/H] at the point,
+        every EEP the grid models with a finite Teff and age and a positive
+        radius.  That is EXOFASTv2's range (EEP 1-808 under ``/allowold``,
+        non-finite rows dropped), NOT the Kiel chart's EEP window or its
+        ``here_be_dragons`` cut, which are presentation choices for the PDF
+        (``MISTPlot._track_rows``).
+        """
+        from exozippy.modelfile import F5, ModelFile
+
+        if not self.n_elements:
+            return []
+        if self._compiled_kiel is None:
+            raise RuntimeError(
+                f"[{self.prefix}] the Kiel plotter is not compiled; the MIST "
+                f"track file needs each star's mass and initial [Fe/H]."
+            )
+        kiel = np.atleast_2d(
+            self._compiled_kiel(*self._point_to_plot_params(point, system))
+        )
+        logmass_col = MISTPlot.KIEL_INDEX["logmass"]
+        initfeh_col = MISTPlot.KIEL_INDEX["initfeh"]
+        files = []
+        for i, grid in enumerate(self._grids):
+            track = mist_grid.interpolate_track(
+                grid,
+                float(kiel[i, logmass_col]),
+                float(kiel[i, initfeh_col]),
+            )
+            teff = track[:, OUTPUT_INDEX["teff_mist"]]
+            radius = track[:, OUTPUT_INDEX["radius_mist"]]
+            age = track[:, OUTPUT_INDEX["age_mist_gyr"]]
+            eep = np.asarray(grid["eep_pts"], dtype=float)
+            keep = np.isfinite(teff) & np.isfinite(age) & (radius > 0)
+            files.append(
+                ModelFile(
+                    f"mist.{self.star_indices[i]:03d}",
+                    [teff[keep], radius[keep], age[keep], eep[keep]],
+                    [F5, F5, F5, F5],
+                    comment=self.MODEL_FILE_TRACK_COMMENT,
+                    ext=".track",
+                )
+            )
+        return files
+
     def _add_prose(self, system):
         """Declare the modeling-draft sentences next to the terms they describe.
 

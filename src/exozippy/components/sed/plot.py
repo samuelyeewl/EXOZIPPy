@@ -318,6 +318,9 @@ class Plot:
                                     'wave_eff': effective wavelength of filter [Angstrom]
                                     'wave_min': minimum wavelength of filter [Angstrom]
                                     'wave_max': maximum wavelength of filter [Angstrom]
+                                    'width_eff': effective width of filter
+                                                 [Angstrom] (SVO WidthEff;
+                                                 None when SVO has none)
                                     len(dict) = nfilters
 
         """
@@ -339,6 +342,7 @@ class Plot:
             filter_params[filter]["wave_eff"] = obj.WavelengthEff  # angstroms
             filter_params[filter]["wave_min"] = obj.WavelengthMin  # angstroms
             filter_params[filter]["wave_max"] = obj.WavelengthMax  # angstroms
+            filter_params[filter]["width_eff"] = obj.WidthEff  # angstroms
 
         self.filter_params = filter_params
 
